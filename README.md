@@ -61,15 +61,26 @@ provides inference with full attention only"), so a run does dense attention ove
 of rows. Measured on an **M3 Ultra (550 GB unified memory)**, bfloat16, one transformer block timed
 and multiplied by 50 (the blocks are identical):
 
-| Request | Packed rows | Per block | Per denoising step | 40 steps |
+| Request | Packed rows | Per block | **Per denoising step** | Peak activations |
 |---|---:|---:|---:|---:|
-| 5 s, 1344x768 | 37,966 | 10.5 s | 8.8 min | **5.85 h** |
-| 15 s, 1344x768 | 109,318 | 74.9 s | 1.04 h | **41.6 h** |
+| 5 s, 1344x768 | 37,966 | 10.5 s | **8.8 min** | 9.3 GB |
+| 15 s, 1344x768 | 109,318 | 74.9 s | **1.04 h** | 24.4 GB |
 
-Peak memory is modest (9.3 GB and 24.4 GB of activations respectively — MLX's attention is
-flash-style and never materializes the score matrix), so **memory is not the constraint. Compute
-is.** 5 s is the shortest clip H3 supports and 15 s at 2K is its flagship capability; 2K is out of
-reach locally.
+Per-step cost is the measured, assumption-free number. The released weights are **CFG-distilled**
+("guidance baked into the weights, so there is no guider, no `negative_prompt` and no
+`guidance_scale`"), so a step is one forward, not two — but MiniMax does not publish a recommended
+step count, and the reference marks `num_inference_steps` required rather than defaulting it. Total
+wall-clock therefore scales directly:
+
+| Steps | 5 s clip | 15 s clip |
+|---:|---:|---:|
+| 8 | 1.2 h | 8.3 h |
+| 16 | 2.3 h | 16.6 h |
+| 50 (generic diffusers default) | 7.3 h | 52 h |
+
+Peak memory is modest — MLX's attention is flash-style and never materializes the score matrix — so
+**memory is not the constraint. Compute is.** 5 s is the shortest clip H3 supports and 15 s at 2K is
+its flagship capability; 2K is out of reach locally.
 
 This also changes what quantization buys. The bottleneck is attention FLOPs, which quantization
 does not reduce. At 5 s the linear layers are ~42% of the work, at 15 s ~20%, so a 4-bit DiT is
