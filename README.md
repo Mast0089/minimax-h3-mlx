@@ -89,6 +89,9 @@ and multiplied by 50 (the blocks are identical):
 | 5 s, 1344x768 | 37,966 | 10.5 s | **8.8 min** | 9.3 GB |
 | 15 s, 1344x768 | 109,318 | 74.9 s | **1.04 h** | 24.4 GB |
 
+A full 5 s generation confirms the extrapolation rather than relying on it: a real step of the
+complete pipeline measured **531.6 s (8.86 min)** against the 8.8 min predicted from one block.
+
 Per-step cost is the measured, assumption-free number. The released weights are **CFG-distilled**
 ("guidance baked into the weights, so there is no guider, no `negative_prompt` and no
 `guidance_scale`"), so a step is one forward, not two — but MiniMax does not publish a recommended
