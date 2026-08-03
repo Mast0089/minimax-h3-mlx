@@ -44,7 +44,7 @@ library_name: mlx
 
 # {repo_name}
 
-MLX (Apple Silicon) build of the [**MiniMax-H3**]( https://huggingface.co/{upstream}) diffusion
+MLX (Apple Silicon) build of the [**MiniMax-H3**](https://huggingface.co/{upstream}) diffusion
 transformer, quantized to **{bits}-bit** (group size {group_size}).
 
 > Powered by MiniMax H3.
@@ -66,7 +66,7 @@ python scripts/generate.py "a red fox leaps over a mossy log" -o fox.mp4
 ```
 
 This repository holds the **transformer only**. The VAEs and the text encoder come from the
-[upstream release]( https://huggingface.co/{upstream}); the pipeline loads them directly.
+[upstream release](https://huggingface.co/{upstream}); the pipeline loads them directly.
 
 ## Size
 
@@ -77,10 +77,13 @@ This repository holds the **transformer only**. The VAEs and the text encoder co
 
 The gap is deliberate. ~13B of H3's 33B parameters are the per-block AdaLN projections, whose only
 input is the timestep embedding. For a fixed sampler schedule every modulation tensor a run needs is
-precomputed once into a ~745 MB table, and the projections are then dropped — so they are on disk
-but never resident. They are kept at bfloat16 here rather than quantized: every block reads the same
-timestep embedding, so an error there biases all 50 blocks identically at every step and accumulates
-along the denoising trajectory.
+precomputed once into a small table, and the projections are then dropped — so they are on disk but
+never resident. The table scales with step count, not model size: measured at **145 MB for a 9-step
+schedule** and 745 MB for 40 steps, against the 26 GB it replaces.
+
+The projections are kept at bfloat16 here rather than quantized. Every block reads the same timestep
+embedding, so an error there is not a per-tensor rounding — it biases all 50 blocks identically at
+every step and accumulates coherently along the denoising trajectory.
 
 ## Read this before choosing a quant
 
@@ -94,7 +97,7 @@ roughly **1.2-1.4x end to end**. Choose a quant to *fit* H3 on your machine, not
 
 ## Licence
 
-Governed by the [MiniMax H3 Community License]( https://huggingface.co/{upstream}/blob/main/LICENSE),
+Governed by the [MiniMax H3 Community License](https://huggingface.co/{upstream}/blob/main/LICENSE),
 a copy of which is included in this repository. It is **not** an open-source licence. Notably:
 redistribution must carry the agreement and mark modified files; commercial products above $20M
 yearly revenue need separate authorization from MiniMax; and **the grant is territorially limited**
