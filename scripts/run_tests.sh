@@ -12,6 +12,7 @@ run tests/test_dit_parity.py
 run tests/test_video_vae_parity.py
 run tests/test_audio_vae_parity.py
 run tests/test_text_encoder_parity.py
+run tests/test_quant_roundtrip.py
 run tests/test_packing_parity.py
 echo
 [ $fail -eq 0 ] && echo "ALL SUITES PASSED" || echo "SOME SUITES FAILED"

@@ -84,14 +84,8 @@ class QuantConfig:
         return None
 
 
-def quantize_dit(model, config: QuantConfig | None = None, verbose: bool = False) -> dict[str, object]:
-    """Quantize a :class:`~minimax_h3_mlx.dit.MiniMaxH3DiT` in place.
-
-    Returns a summary with the before/after footprint and the per-width layer counts.
-    """
-    config = config or QuantConfig()
-    before = _footprint(model)
-    counts: dict[int, int] = {}
+def _class_predicate(config: QuantConfig, counts: dict[int, int] | None = None, verbose: bool = False):
+    """Build the `nn.quantize` predicate for a recipe, shared by conversion and loading."""
 
     def predicate(path: str, module: nn.Module) -> bool | dict:
         if not isinstance(module, nn.Linear):
@@ -105,10 +99,43 @@ def quantize_dit(model, config: QuantConfig | None = None, verbose: bool = False
                 print(f"  skip {path}: in_features {module.weight.shape[-1]} "
                       f"not divisible by group_size {config.group_size}")
             return False
-        counts[bits] = counts.get(bits, 0) + 1
+        if counts is not None:
+            counts[bits] = counts.get(bits, 0) + 1
         return {"group_size": config.group_size, "bits": bits}
 
-    nn.quantize(model, group_size=config.group_size, bits=config.bits, class_predicate=predicate)
+    return predicate
+
+
+def apply_quantization_structure(model, config: QuantConfig) -> None:
+    """Convert the module tree to quantized layers *without* meaningful weights.
+
+    Loading a quantized checkpoint needs the tree to already hold `QuantizedLinear` layers, since
+    those carry packed weights plus scales and biases under different names than `nn.Linear`. This
+    replays the recorded recipe so the keys line up; the values are then overwritten by the load.
+    """
+    nn.quantize(
+        model,
+        group_size=config.group_size,
+        bits=config.bits,
+        class_predicate=_class_predicate(config),
+    )
+
+
+def quantize_dit(model, config: QuantConfig | None = None, verbose: bool = False) -> dict[str, object]:
+    """Quantize a :class:`~minimax_h3_mlx.dit.MiniMaxH3DiT` in place.
+
+    Returns a summary with the before/after footprint and the per-width layer counts.
+    """
+    config = config or QuantConfig()
+    before = _footprint(model)
+    counts: dict[int, int] = {}
+
+    nn.quantize(
+        model,
+        group_size=config.group_size,
+        bits=config.bits,
+        class_predicate=_class_predicate(config, counts, verbose),
+    )
     mx.eval(model.parameters())
     after = _footprint(model)
 

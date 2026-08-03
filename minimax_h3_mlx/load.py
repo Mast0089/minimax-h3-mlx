@@ -77,6 +77,27 @@ def load_dit(
     config = DiTConfig.from_json(model_dir / "config.json")
     model = MiniMaxH3DiT(config)
 
+    # A quantized build carries `quant_config.json`. Quantized layers hold packed weights plus
+    # scales and biases, so the module tree has to be quantized *before* loading or the keys will
+    # not line up — the same recipe is replayed from the file rather than guessed.
+    quant_path = model_dir / "quant_config.json"
+    if quant_path.exists():
+        from .quantize import QuantConfig, apply_quantization_structure
+
+        with open(quant_path) as fh:
+            recipe = json.load(fh)
+        apply_quantization_structure(
+            model,
+            QuantConfig(
+                bits=recipe["bits"],
+                group_size=recipe["group_size"],
+                quantize_adaln=recipe.get("quantize_adaln", False),
+                adaln_bits=recipe.get("adaln_bits") or 8,
+            ),
+        )
+        if verbose:
+            print(f"  quantized structure: {recipe['bits']}-bit, group {recipe['group_size']}")
+
     expected = {key for key, _ in tree_flatten(model.parameters())}
     weights: dict[str, mx.array] = {}
     unexpected: list[str] = []
