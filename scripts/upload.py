@@ -102,12 +102,27 @@ divergence. 20 paired observations per variant, aggregated with a paired bootstr
 Every interval is disjoint from its neighbours, so the ranking is solid. Two things worth noting:
 the steepest step is **6 to 4 bits** (2.7x), not at the low end; and audio degrades faster in
 relative terms than video (its share of the error climbs from 0.40x at 8-bit to 0.82x at 3-bit),
-plausibly because audio is a small fraction of the packed rows and has less redundancy to absorb
-error. 2-bit is not published — extrapolation puts it near 50% velocity error.
+plausibly because audio is a small fraction of the packed rows and has less redundancy to absorb it.
 
-Note that relative velocity error is not the same as "that much worse output": the scheduler
-integrates velocity across steps, so per-step error compounds along the trajectory. These numbers
-rank the widths reliably; they do not by themselves locate the point where output becomes unusable.
+## Why 8, 6 and 4 bits only
+
+Velocity error ranks the widths but does not say where output stops being usable — the scheduler
+integrates velocity, so per-step error compounds along the trajectory. That has to be generated to
+be seen. The same prompt, seed and settings were rendered through each checkpoint and compared to
+bfloat16:
+
+| build | PSNR vs bf16 | correlation | outcome |
+|---|---:|---:|---|
+| 8-bit | **27.6 dB** | 0.959 | near-identical |
+| 4-bit | 22.0 dB | 0.854 | cooler colour, background artifacting, subject intact |
+| 3-bit | 16.3 dB | 0.740 | **subject destroyed** |
+
+At 3 bits the scene is gone — no animal, no log, just a textured field. It is built but **not
+published**. Notably it does not degrade by blurring: its per-frame variance *rises* (54.7 against
+bfloat16's 37.1) as structure is replaced by high-frequency noise, so a sharpness metric would have
+scored it as healthy. 2-bit is not published either; extrapolation puts it near 50% velocity error.
+
+6-bit was not rendered separately — it is bracketed by 8-bit and 4-bit, which both pass.
 
 ## Read this before choosing a quant
 
