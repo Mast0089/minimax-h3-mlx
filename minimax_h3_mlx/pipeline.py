@@ -306,13 +306,22 @@ class MiniMaxH3Pipeline:
                 layout.text_indices,
                 modulation_cache=self._cache,
             )
-            video_rows[n_cond_v:] = video_sched.step(
+            # Rebind rather than assign into a slice: the stepped result is a lazy graph reading the
+            # very rows it would overwrite, and with conditioning rows present the two halves must
+            # stay distinct. Concatenating is unambiguous and costs nothing next to the forward.
+            stepped_video = video_sched.step(
                 video_pred[0, n_cond_v:].astype(mx.float32), float(t), video_rows[n_cond_v:]
             )
-            audio_rows[n_cond_a:] = audio_sched.step(
+            stepped_audio = audio_sched.step(
                 audio_pred[0, n_cond_a:].astype(mx.float32),
                 float(audio_sched.timesteps[i].item()),
                 audio_rows[n_cond_a:],
+            )
+            video_rows = (
+                mx.concatenate([video_rows[:n_cond_v], stepped_video]) if n_cond_v else stepped_video
+            )
+            audio_rows = (
+                mx.concatenate([audio_rows[:n_cond_a], stepped_audio]) if n_cond_a else stepped_audio
             )
             mx.eval(video_rows, audio_rows)
             step_times.append(time.perf_counter() - started)
