@@ -37,22 +37,27 @@ only the pipeline metadata (`partition`, `tasks`) differs. One conversion covers
 
 ### AdaLN precompute: 13B of the 33B need not be resident
 
-Roughly 13B parameters live in the per-block `adaln_proj.linear` projections (50 x `[96768, 2688]`).
-Their only input is the timestep embedding — nothing sequence-dependent — so for a fixed sampler
-schedule every modulation tensor a run will ever need can be computed once up front and the
-projections then dropped. For a 40-step schedule the cache is
-
-```
-50 blocks x 6 tensors x (40 timesteps x 3 modalities) x 5376 = 193M values  (~387 MB bf16)
-```
-
-against ~26 GB for the projections it replaces — a **67x** reduction, taking the resident DiT from
-33B to ~20B. `ModulationCache` builds it and `drop_adaln_weights` frees the originals; the cache is
+13B parameters live in the per-block `adaln_proj.linear` projections (50 x `[96768, 2688]`). Their
+only input is the timestep embedding — nothing sequence-dependent — so for a fixed sampler schedule
+every modulation tensor a run will ever need can be computed once up front and the projections then
+dropped. `ModulationCache` builds it and `drop_adaln_weights` frees the originals; the cache is
 verified bit-exact against the live projection.
+
+Measured on the real checkpoint, a 40-step run (video and audio use different sigma shifts, 12.0 and
+3.0, so their schedules only partly coincide — 77 distinct timesteps in all, not 40):
+
+| | params | resident |
+|---|---:|---:|
+| DiT as shipped | 33.12B | 66.3 GB |
+| `adaln_proj` dropped | -13.01B | -26.0 GB |
+| **after** | **20.11B** | **40.3 GB + 745 MB cache** |
+
+A **25.3 GB net saving**, with the cache 35x smaller than the weights it replaces and built in 0.7 s.
 
 The table is built from the float32 timestep MLP through the *unquantized* projections. Every block
 reads the same `temb`, so an error there biases all 50 blocks identically at every step and
 accumulates coherently along the trajectory — building it before quantization keeps that path exact.
+
 
 ## Performance: read this before converting anything
 
@@ -92,15 +97,19 @@ generation quick.
 | Piece | State |
 |---|---|
 | DiT (`MiniMaxH3DiT`) | **done** — matches diffusers reference to 4.8e-07 |
-| AdaLN precompute + drop | **done** — bit-exact vs live projection |
+| Video VAE | **done** — encode + decode match to 1.2e-06, tiled and untiled |
+| AdaLN precompute + drop | **done** — bit-exact; verified on the real 33B checkpoint |
 | Scheduler | **done** — bit-exact sigmas, timesteps and 16-step trajectory |
 | Packed-sequence geometry | **done** — bit-exact `(t, h, w)` grid, tags, indices |
-| Checkpoint loader | written, pending real-weight run |
-| Video VAE | not started |
+| Checkpoint loader | **done** — real 66.3 GB checkpoint loads with zero key mismatches |
 | Audio VAE | not started |
 | Text encoder wiring | not started (mlx-vlm has `qwen3_vl`) |
 | Pipeline / denoise loop | not started |
 | Quant set | not started |
+
+The loader was run against the released `FL2VA/transformer`: 33.12B parameters over 534 tensors,
+every key matched, and the mixed-precision split survives intact — 12 float32 tensors (the two patch
+projections, the timestep MLP and the two output heads) against 522 bfloat16.
 
 ### Validation
 
@@ -117,10 +126,14 @@ assuming them:
 
 Both mean the released checkpoint loads **1:1 with no weight surgery**.
 
+The video VAE is checked the same way, through `convert_video_vae_key`, on the reference's own tiny
+CPU-parity config. Its `attn.to_qkv` is interleaved and its `ff.w1` fused exactly like the DiT's.
+
 ```bash
-./.venv/bin/python tests/test_dit_parity.py       # 4.8e-07 vs reference
-./.venv/bin/python tests/test_packing_parity.py   # 81 checks, all bit-exact
-python3 tests/test_dit_smoke.py                   # no torch needed
+./.venv/bin/python tests/test_dit_parity.py        # 4.8e-07 vs reference
+./.venv/bin/python tests/test_video_vae_parity.py  # 1.2e-06, tiled + untiled
+./.venv/bin/python tests/test_packing_parity.py    # 81 checks, all bit-exact
+python3 tests/test_dit_smoke.py                    # no torch needed
 ```
 
 Two places needed care to stay bit-exact, both because a one-ulp difference is observable:
@@ -146,6 +159,7 @@ minimax_h3_mlx/
   scheduler.py   rectified-flow Euler with exponential sigma shift
   packing.py     packed-sequence geometry, patchify/unpatchify, row timesteps
   load.py        checkpoint loading, mixed fp32/bf16 split preserved
+  video_vae.py   causal 3D CNN encoder + 36-layer ViT decoder, tiled
 reference/       upstream sources, for validation only
 scripts/         bench_dit.py
 tests/           parity + smoke tests
