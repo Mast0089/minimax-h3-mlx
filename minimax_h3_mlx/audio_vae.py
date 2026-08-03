@@ -43,6 +43,8 @@ class AudioVAEConfig:
     resblock_kernel_sizes: tuple[int, ...] = (3, 7, 11)
     resblock_dilation_sizes: tuple[tuple[int, ...], ...] = ((1, 3, 5), (1, 3, 5), (1, 3, 5))
     sampling_rate: int = 32000
+    latents_mean: tuple[float, ...] = ()
+    latents_std: tuple[float, ...] = ()
 
     @property
     def hop_length(self) -> int:

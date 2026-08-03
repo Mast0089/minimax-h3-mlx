@@ -189,6 +189,8 @@ def load_audio_vae(model_dir: str | Path, strict: bool = True):
     model_dir = Path(model_dir)
     with open(model_dir / "metadata.json") as fh:
         kwargs = json.load(fh)["metadata"]["kwargs"]
+    with open(model_dir / "config.json") as fh:
+        wrapper = json.load(fh)
 
     config = AudioVAEConfig(
         encoder_dim=kwargs["encoder_dim"],
@@ -198,6 +200,8 @@ def load_audio_vae(model_dir: str | Path, strict: bool = True):
         decoder_dim=kwargs["decoder_dim"],
         decoder_rates=tuple(kwargs["decoder_rates"]),
         sampling_rate=kwargs["sample_rate"],
+        latents_mean=tuple(wrapper.get("latents_mean", ())),
+        latents_std=tuple(wrapper.get("latents_std", ())),
     )
     model = AudioVAE(config)
     expected = {key for key, _ in tree_flatten(model.parameters())}

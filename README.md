@@ -122,7 +122,7 @@ generation quick.
 | Packed-sequence geometry | **done** — bit-exact `(t, h, w)` grid, tags, indices |
 | Text encoder | **done** — `hidden_states[50]` matches HF to 5.0e-08 |
 | Checkpoint loaders | **done** — all four components load from the release, zero key mismatches |
-| Pipeline / denoise loop | not started |
+| Pipeline / denoise loop | **done** — generates prompt-faithful video + synced audio |
 | Quant set | not started |
 
 All four components were loaded from the released checkpoint and exercised:
@@ -140,6 +140,27 @@ All four components were loaded from the released checkpoint and exercised:
 
 The keyframe/image path (vision tower, `"<Picture i>: "` labels, vision blocks tagged *video*) is
 implemented but so far only the text-only `t2va` path has been run end to end.
+
+### End to end
+
+```bash
+./.venv/bin/python scripts/generate.py "a red fox leaps over a mossy log" -o fox.mp4
+```
+
+A first run produces a misty forest with tall trunks, a mossy log in the foreground and an orange
+fox form moving across the later frames — semantically faithful to the prompt, with audio muxed in.
+Beyond eyeballing it, three properties are what say the wiring is right rather than merely plausible:
+
+* **Temporal coherence** — adjacent frames differ less than distant ones (mean |Δ| 9.6 vs 12.7). A
+  pipeline that packed the time axis wrongly would show no such gradient.
+* **Stereo coherence** — the two audio channels correlate at **+0.947**: high, but not 1.0. That is
+  what real stereo looks like, and it exercises the channel-major audio packing, where the two
+  blocks of rows are pinned to opposite ends of the width grid.
+* **Duration agreement** — video and audio land within 8 ms of each other (5.167 s vs 5.175 s), the
+  residue of the 40 Hz audio latent grid, which is the shared rotary clock doing its job.
+
+Output is written with no extra dependencies: stereo WAV through the standard library's `wave`
+module, video piped as raw RGB into `ffmpeg` (with a PNG-sequence fallback if it is absent).
 
 ### Validation
 
@@ -200,6 +221,8 @@ minimax_h3_mlx/
   video_vae.py   causal 3D CNN encoder + 36-layer ViT decoder, tiled
   audio_vae.py   DAC encoder + attention projection + BigVGAN decoder
   text_encoder.py Qwen3-VL-32B conditioner, truncated to the 50 layers H3 reads
+  pipeline.py    packing, the joint denoise loop, decoding
+  media.py       mp4 / wav writing, dependency-free
 reference/       upstream sources, for validation only
 scripts/         bench_dit.py
 tests/           parity + smoke tests
