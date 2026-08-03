@@ -20,7 +20,12 @@ DESCRIPTION = (
     "transformer. Code: github.com/PipeNetwork/minimax-h3-mlx"
 )
 
+# Largest first, so the list reads as a quality ladder.
 ITEMS = [
+    ("pipenetwork/MiniMax-H3-MLX-f32",
+     "132.6 GB. Upcast float32. No more information than bf16 - for fine-tuning, not for generating."),
+    ("pipenetwork/MiniMax-H3-MLX-bf16",
+     "66.3 GB. Unquantized, the release's native mixed bf16/f32 precision. The quality reference."),
     ("pipenetwork/MiniMax-H3-MLX-8bit",
      "35.3 GB download, 21.5 GB resident. 27.6 dB PSNR vs bfloat16 - near-indistinguishable."),
     ("pipenetwork/MiniMax-H3-MLX-6bit",
