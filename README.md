@@ -115,6 +115,9 @@ generation quick.
 
 ## Published quants
 
+Collection: [**pipenetwork/MiniMax-H3 MLX**](https://huggingface.co/collections/pipenetwork/minimax-h3-mlx-6a70c7ef3f7bfae7dc3d2e82)
+
+
 | build | on disk | resident | PSNR vs bf16 | velocity rel-L2 |
 |---|---:|---:|---:|---:|
 | [8bit](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-8bit) | 35.3 GB | **21.5 GB** | 27.6 dB | 0.0329 |
