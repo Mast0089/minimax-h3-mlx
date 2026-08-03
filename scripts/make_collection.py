@@ -51,6 +51,7 @@ def main() -> int:
         return 0
 
     from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
     api = HfApi()
     collection = api.create_collection(
@@ -60,11 +61,24 @@ def main() -> int:
         private=args.private,
         exists_ok=True,
     )
+    added, skipped = 0, []
     for item, note in ITEMS:
+        # A repo may not be published yet — add what exists rather than failing the whole refresh,
+        # so a partial set still produces a usable collection.
+        try:
+            api.model_info(item)
+        except (RepositoryNotFoundError, HfHubHTTPError):
+            skipped.append(item)
+            continue
         api.add_collection_item(
             collection.slug, item_id=item, item_type="model", note=note, exists_ok=True
         )
+        added += 1
+
     print(f"\nhttps://huggingface.co/collections/{collection.slug}")
+    print(f"added {added} item(s)")
+    if skipped:
+        print(f"skipped {len(skipped)} not yet published: {', '.join(skipped)}")
     return 0
 
 
