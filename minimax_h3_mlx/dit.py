@@ -33,6 +33,19 @@ import mlx.nn as nn
 from .config import MODALITY_NUM, DiTConfig
 
 
+def param_dtype(layer: nn.Module) -> mx.Dtype:
+    """The dtype a layer's *activations* should be aligned to.
+
+    The reference casts each input to its projection's parameter dtype, and reading
+    ``layer.weight.dtype`` is the obvious way to do that — but it is wrong the moment the layer is
+    quantized. ``QuantizedLinear.weight`` is **packed uint32 storage**, so casting activations to it
+    truncates them to integers, silently and identically at every bit width. The scales carry the
+    real compute dtype.
+    """
+    scales = getattr(layer, "scales", None)
+    return scales.dtype if scales is not None else layer.weight.dtype
+
+
 def timestep_embedding(
     timesteps: mx.array,
     dim: int,
@@ -187,7 +200,7 @@ class AdaLayerNormModulation(nn.Module):
 
     def __call__(self, temb: mx.array) -> tuple[mx.array, ...]:
         # Activate at `temb`'s own (float32) precision, cast to the projection's dtype after.
-        h = nn.silu(temb).astype(self.linear.weight.dtype)
+        h = nn.silu(temb).astype(param_dtype(self.linear))
         h = self.linear(h).reshape(-1, 6 * self.hidden_size)
         return tuple(h[..., i * self.hidden_size : (i + 1) * self.hidden_size] for i in range(6))
 
@@ -216,7 +229,7 @@ class FinalLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
     def norm_out(self, x: mx.array, temb: mx.array, timestep_indices: mx.array) -> mx.array:
-        h = self.adaln_proj.linear(nn.silu(temb).astype(self.adaln_proj.linear.weight.dtype))
+        h = self.adaln_proj.linear(nn.silu(temb).astype(param_dtype(self.adaln_proj.linear)))
         shift, scale = h[..., : self.hidden_size], h[..., self.hidden_size :]
         x = self.norm(x)
         return x * (1.0 + scale[timestep_indices]) + shift[timestep_indices]
@@ -357,9 +370,9 @@ class MiniMaxH3DiT(nn.Module):
 
         # 1. Project each modality and scatter the rows into the packed buffer. The text stream
         #    sets the dtype of the packed sequence.
-        video_embeds = self.video_patch_proj(video_latents.astype(self.video_patch_proj.weight.dtype))
-        audio_embeds = self.audio_patch_proj(audio_latents.astype(self.audio_patch_proj.weight.dtype))
-        text = self.condition_proj(text_embeds.astype(self.condition_proj.weight.dtype))
+        video_embeds = self.video_patch_proj(video_latents.astype(param_dtype(self.video_patch_proj)))
+        audio_embeds = self.audio_patch_proj(audio_latents.astype(param_dtype(self.audio_patch_proj)))
+        text = self.condition_proj(text_embeds.astype(param_dtype(self.condition_proj)))
         text = self.token_refiner(text)
 
         B = text.shape[0]
@@ -383,6 +396,6 @@ class MiniMaxH3DiT(nn.Module):
 
         # 4. Both heads run over every row, then each modality's rows are selected.
         x = self.final_layer.norm_out(x, temb, timestep_indices)
-        video_out = self.final_layer.video_out(x.astype(self.final_layer.video_out.weight.dtype))
-        audio_out = self.final_layer.audio_out(x.astype(self.final_layer.audio_out.weight.dtype))
+        video_out = self.final_layer.video_out(x.astype(param_dtype(self.final_layer.video_out)))
+        audio_out = self.final_layer.audio_out(x.astype(param_dtype(self.final_layer.audio_out)))
         return video_out[:, video_indices], audio_out[:, audio_indices]

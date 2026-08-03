@@ -32,10 +32,12 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
+from mlx.utils import tree_flatten, tree_unflatten
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minimax_h3_mlx.adaln import ModulationCache
+from minimax_h3_mlx.dit import MiniMaxH3DiT
 from minimax_h3_mlx.load import load_dit
 from minimax_h3_mlx.packing import (
     FPS,
@@ -185,14 +187,19 @@ def main() -> int:
             cases.append({"prompt": prompt, "seed": seed, "layout": layout, "embeds": embeds,
                           "table": table, "plan": plan, "trajectory": trajectory})
             print(f"  reference trajectory: {prompt[:32]}... seed {seed}, "
-                  f"{len(trajectory)} steps, {layout.sequence_length:,} rows")
+                  f"{len(trajectory)} steps, {layout.sequence_length:,} rows", flush=True)
+    base_weights = dict(tree_flatten(reference.parameters()))
     del reference
 
-    # 2. Each variant re-predicts at the *same* latents.
+    # 2. Each variant re-predicts at the *same* latents. The bfloat16 weights are kept in memory and
+    #    the model rebuilt from them per variant: quantization is destructive, but re-reading 62 GB
+    #    from disk four times costs far more than holding it once.
     results = {"video_rel_l2": {}, "audio_rel_l2": {}, "video_cos": {}}
     for bits in args.variants:
         started = time.perf_counter()
-        model = load_dit(source / "transformer")
+        model = MiniMaxH3DiT(cfg)
+        model.update(tree_unflatten(list(base_weights.items())))
+        mx.eval(model.parameters())
         summary = quantize_dit(model, QuantConfig(bits=bits, group_size=args.group_size))
         v_l2, a_l2, v_cos = [], [], []
         for case in cases:
