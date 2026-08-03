@@ -26,7 +26,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("prompt")
     parser.add_argument("-o", "--output", default="out.mp4")
-    parser.add_argument("-c", "--checkpoint", default=DEFAULT_CHECKPOINT)
+    parser.add_argument("-c", "--checkpoint", default=DEFAULT_CHECKPOINT,
+                        help="the upstream release; supplies the VAEs and text encoder")
+    parser.add_argument("-t", "--transformer", default=None,
+                        help="a quantized transformer directory to use instead of the release's")
     parser.add_argument("-d", "--duration", type=float, default=5.0, help="seconds, 5 to 15")
     parser.add_argument("-s", "--steps", type=int, default=16, help="sigma grid points; drives steps - 1 forwards")
     parser.add_argument("--seed", type=int, default=0)
@@ -49,7 +52,9 @@ def main() -> int:
     if images and len(anchors) != len(images):
         parser.error(f"--anchor must be given once per --image ({len(images)} images, {len(anchors)} anchors)")
 
-    pipe = MiniMaxH3Pipeline.from_pretrained(args.checkpoint, load_vision=bool(images))
+    pipe = MiniMaxH3Pipeline.from_pretrained(
+        args.checkpoint, transformer_dir=args.transformer, load_vision=bool(images)
+    )
     result = pipe(
         args.prompt,
         duration_seconds=args.duration,

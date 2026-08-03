@@ -96,18 +96,22 @@ def final_layer_modulation(dit, timesteps: mx.array, dtype: mx.Dtype = mx.bfloat
 def drop_adaln_weights(dit) -> int:
     """Delete the per-block ``adaln_proj`` projections after a cache has been built.
 
-    Returns the number of parameters dropped. Only safe once a :class:`ModulationCache` covering
-    the whole schedule exists — the block stack will raise if asked to modulate without one.
+    Returns the number of **bytes** freed. Only safe once a :class:`ModulationCache` covering the
+    whole schedule exists — the block stack will raise if asked to modulate without one.
+
+    A quantized projection carries ``scales`` and ``biases`` alongside its packed ``weight``;
+    dropping only ``weight`` and ``bias`` would strand them and under-report the saving, so every
+    array the layer holds is removed.
     """
-    dropped = 0
+    freed = 0
     for block in dit.blocks:
         linear = block.adaln_proj.linear
-        for name in ("weight", "bias"):
+        for name in ("weight", "bias", "scales", "biases"):
             param = getattr(linear, name, None)
-            if param is not None:
-                dropped += param.size
+            if isinstance(param, mx.array):
+                freed += param.nbytes
                 delattr(linear, name)
-    return dropped
+    return freed
 
 
 def schedule_timesteps(sigmas: mx.array, conditioning_level: float = 0.0) -> mx.array:

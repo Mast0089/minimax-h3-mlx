@@ -109,12 +109,12 @@ def test_modulation_cache_matches_live_projection():
     print(f"modulation cache exact: video delta {dv}, audio delta {da}")
 
     # Once cached, the projections can be dropped and the model still runs.
-    dropped = drop_adaln_weights(dit)
+    freed = drop_adaln_weights(dit)
     after_v, after_a = dit(*args, modulation_cache=cache)
     mx.eval(after_v, after_a)
     assert float(mx.max(mx.abs(after_v - cached_v)).item()) == 0.0
     total = sum(p.size for _, p in _flatten(dit.parameters()))
-    print(f"dropped {dropped:,} adaln params; {total:,} remain")
+    print(f"dropped adaln, freeing {freed / 1024:.1f} KB; {total:,} params remain")
 
 
 def test_schedule_timesteps():

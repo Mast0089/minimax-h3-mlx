@@ -75,15 +75,25 @@ class MiniMaxH3Pipeline:
     def from_pretrained(
         cls,
         checkpoint_dir: str | Path,
+        transformer_dir: str | Path | None = None,
         dtype: mx.Dtype = mx.bfloat16,
         load_vision: bool = False,
         verbose: bool = True,
     ) -> "MiniMaxH3Pipeline":
-        """Load a released ``FL2VA/`` (or ``Ref2VA/``) directory."""
+        """Load a released ``FL2VA/`` (or ``Ref2VA/``) directory.
+
+        Args:
+            checkpoint_dir: the upstream release, which supplies the VAEs and the text encoder.
+            transformer_dir: load the DiT from here instead of ``<checkpoint_dir>/transformer``.
+                This is how a published quant is used: the quantized repository holds only the
+                transformer, and everything else still comes from upstream. ``load_dit`` picks up
+                the recorded recipe from its ``quant_config.json`` automatically.
+        """
         from .load import load_audio_vae, load_dit, load_video_vae
         from .text_encoder import MiniMaxH3TextEncoder
 
         root = Path(checkpoint_dir)
+        dit_path = Path(transformer_dir) if transformer_dir else root / "transformer"
         config = PipelineConfig.from_model_index(root / "model_index.json")
 
         def step(label, fn):
@@ -98,7 +108,7 @@ class MiniMaxH3Pipeline:
         text_encoder = step(
             "text encoder", lambda: MiniMaxH3TextEncoder(root / "text_encoder", dtype=dtype, load_vision=load_vision)
         )
-        dit = step("transformer", lambda: load_dit(root / "transformer"))
+        dit = step(f"transformer ({dit_path.name})", lambda: load_dit(dit_path))
         video_vae = step("video vae", lambda: load_video_vae(root / "video_vae"))
         audio_vae = step("audio vae", lambda: load_audio_vae(root / "audio_vae"))
         return cls(dit, text_encoder, video_vae, audio_vae, config)
@@ -145,10 +155,10 @@ class MiniMaxH3Pipeline:
             print(f"  adaln cache: {len(key)} timesteps, {self._cache.nbytes() / 1e6:.0f} MB "
                   f"in {time.perf_counter() - started:.1f}s")
         if drop_adaln:
-            dropped = drop_adaln_weights(self.dit)
+            freed = drop_adaln_weights(self.dit)
             mx.eval(self.dit.parameters())
             if verbose:
-                print(f"  dropped {dropped / 1e9:.2f}B adaln params ({dropped * 2 / 1e9:.1f} GB)")
+                print(f"  dropped adaln projections, freeing {freed / 1e9:.1f} GB")
 
     # -- keyframe conditioning ----------------------------------------------------------------
 
