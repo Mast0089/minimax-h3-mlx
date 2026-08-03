@@ -59,6 +59,24 @@ reads the same `temb`, so an error there biases all 50 blocks identically at eve
 accumulates coherently along the trajectory — building it before quantization keeps that path exact.
 
 
+### Encoder truncation: 14 of 64 layers are never evaluated
+
+H3 reads the **unnormalized** hidden state after the 50th of Qwen3-VL-32B's 64 decoder layers and
+feeds it straight to the DiT's `condition_proj`. The language-model head, the final norm and layers
+50-63 are never touched, so the port loads only what it reads:
+
+| | params | resident |
+|---|---:|---:|
+| text encoder on disk | — | 66.7 GB |
+| layers 0-49 only, no `lm_head`, no vision tower | 25.16B | **50.3 GB** |
+
+506 tensors are skipped. Reading pre-norm is a real distinction, not a detail — the parity test
+asserts the returned state *differs* from `last_hidden_state`, since silently returning the normed
+output would still look plausible.
+
+Together with the AdaLN precompute, the two structural savings take the resident pipeline from
+144 GB to about **102 GB before any quantization**.
+
 ## Performance: read this before converting anything
 
 MiniMax has **not** released its sparse-attention implementation ("the initial open-source release
@@ -102,8 +120,8 @@ generation quick.
 | AdaLN precompute + drop | **done** — bit-exact; verified on the real 33B checkpoint |
 | Scheduler | **done** — bit-exact sigmas, timesteps and 16-step trajectory |
 | Packed-sequence geometry | **done** — bit-exact `(t, h, w)` grid, tags, indices |
-| Checkpoint loaders | **done** — all three components load from the release, zero key mismatches |
-| Text encoder wiring | not started (mlx-vlm has `qwen3_vl`) |
+| Text encoder | **done** — `hidden_states[50]` matches HF to 5.0e-08 |
+| Checkpoint loaders | **done** — all four components load from the release, zero key mismatches |
 | Pipeline / denoise loop | not started |
 | Quant set | not started |
 
@@ -118,6 +136,10 @@ All three components were loaded from the released checkpoint and exercised:
   through a `(1, 48, 7, 8, 8)` latent at **0.962 correlation / 21.9 dB PSNR**, and the decoded frame
   counts match `video_latent_num_frames` exactly (7 latent -> 22 frames, 12 -> 39) — the packing
   geometry and the VAE's temporal chunking were ported separately and agree.
+* **Text encoder** — 25.16B params over 50 layers; a prompt encodes to `(1, N, 5120)` in 0.9 s.
+
+The keyframe/image path (vision tower, `"<Picture i>: "` labels, vision blocks tagged *video*) is
+implemented but so far only the text-only `t2va` path has been run end to end.
 
 ### Validation
 
@@ -147,6 +169,7 @@ the released checkpoint actually ships, matching to 3.0e-08.
 ./.venv/bin/python tests/test_dit_parity.py        # 4.8e-07 vs reference
 ./.venv/bin/python tests/test_video_vae_parity.py  # 1.2e-06, tiled + untiled
 ./.venv/bin/python tests/test_audio_vae_parity.py  # 6.6e-07 encode, 2.1e-08 decode
+./.venv/bin/python tests/test_text_encoder_parity.py  # 5.0e-08 vs transformers
 ./.venv/bin/python tests/test_packing_parity.py    # 81 checks, all bit-exact
 python3 tests/test_dit_smoke.py                    # no torch needed
 ```
@@ -176,6 +199,7 @@ minimax_h3_mlx/
   load.py        checkpoint loading, mixed fp32/bf16 split preserved
   video_vae.py   causal 3D CNN encoder + 36-layer ViT decoder, tiled
   audio_vae.py   DAC encoder + attention projection + BigVGAN decoder
+  text_encoder.py Qwen3-VL-32B conditioner, truncated to the 50 layers H3 reads
 reference/       upstream sources, for validation only
 scripts/         bench_dit.py
 tests/           parity + smoke tests
