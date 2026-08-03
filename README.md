@@ -98,18 +98,26 @@ generation quick.
 |---|---|
 | DiT (`MiniMaxH3DiT`) | **done** — matches diffusers reference to 4.8e-07 |
 | Video VAE | **done** — encode + decode match to 1.2e-06, tiled and untiled |
+| Audio VAE | **done** — encode 6.6e-07, decode 2.1e-08 |
 | AdaLN precompute + drop | **done** — bit-exact; verified on the real 33B checkpoint |
 | Scheduler | **done** — bit-exact sigmas, timesteps and 16-step trajectory |
 | Packed-sequence geometry | **done** — bit-exact `(t, h, w)` grid, tags, indices |
-| Checkpoint loader | **done** — real 66.3 GB checkpoint loads with zero key mismatches |
-| Audio VAE | not started |
+| Checkpoint loaders | **done** — all three components load from the release, zero key mismatches |
 | Text encoder wiring | not started (mlx-vlm has `qwen3_vl`) |
 | Pipeline / denoise loop | not started |
 | Quant set | not started |
 
-The loader was run against the released `FL2VA/transformer`: 33.12B parameters over 534 tensors,
-every key matched, and the mixed-precision split survives intact — 12 float32 tensors (the two patch
-projections, the timestep MLP and the two output heads) against 522 bfloat16.
+All three components were loaded from the released checkpoint and exercised:
+
+* **DiT** — 33.12B over 534 tensors, every key matched, mixed precision intact (12 float32 tensors
+  for the patch projections, timestep MLP and output heads; 522 bfloat16).
+* **Audio VAE** — 151.3M params, 40 latents/s at 32 kHz as specified. Round-tripping real signals
+  gives **33.2 dB SNR** on a 440 Hz tone and 0.9995 correlation on a decaying note; phase-accurate
+  reconstruction is what proves the convolution transposes and the folded weight norm are right.
+* **Video VAE** — 2.60B params, 16x spatial / 4x temporal. A 22-frame 128x128 clip round-trips
+  through a `(1, 48, 7, 8, 8)` latent at **0.962 correlation / 21.9 dB PSNR**, and the decoded frame
+  counts match `video_latent_num_frames` exactly (7 latent -> 22 frames, 12 -> 39) — the packing
+  geometry and the VAE's temporal chunking were ported separately and agree.
 
 ### Validation
 
@@ -129,9 +137,16 @@ Both mean the released checkpoint loads **1:1 with no weight surgery**.
 The video VAE is checked the same way, through `convert_video_vae_key`, on the reference's own tiny
 CPU-parity config. Its `attn.to_qkv` is interleaved and its `ff.w1` fused exactly like the DiT's.
 
+The audio VAE inverts the port's two departures instead: its MLX weights are converted back to
+channels-first, to torch's transposed-conv axis order, and to a reconstructed `weight_g`/`weight_v`
+pair (`v = w`, `g = ||w||`), which proves folding weight norm at load is equivalent rather than
+assumed. Its recomputed Kaiser-sinc anti-aliasing filters are additionally checked against the ones
+the released checkpoint actually ships, matching to 3.0e-08.
+
 ```bash
 ./.venv/bin/python tests/test_dit_parity.py        # 4.8e-07 vs reference
 ./.venv/bin/python tests/test_video_vae_parity.py  # 1.2e-06, tiled + untiled
+./.venv/bin/python tests/test_audio_vae_parity.py  # 6.6e-07 encode, 2.1e-08 decode
 ./.venv/bin/python tests/test_packing_parity.py    # 81 checks, all bit-exact
 python3 tests/test_dit_smoke.py                    # no torch needed
 ```
@@ -160,6 +175,7 @@ minimax_h3_mlx/
   packing.py     packed-sequence geometry, patchify/unpatchify, row timesteps
   load.py        checkpoint loading, mixed fp32/bf16 split preserved
   video_vae.py   causal 3D CNN encoder + 36-layer ViT decoder, tiled
+  audio_vae.py   DAC encoder + attention projection + BigVGAN decoder
 reference/       upstream sources, for validation only
 scripts/         bench_dit.py
 tests/           parity + smoke tests

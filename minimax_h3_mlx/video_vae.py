@@ -610,6 +610,15 @@ class VideoVAE(nn.Module):
         num_tokens = z.shape[1] + token_drop
         pad_tokens = (-num_tokens) % chunk_tokens
         num_chunks = (num_tokens + pad_tokens) // chunk_tokens - int(token_drop > 0)
+        if num_chunks < 1:
+            # `token_drop` consumes a whole chunk's worth of lead-in, so the shortest decodable
+            # latent is one full chunk beyond it. The reference has the same floor; it just fails
+            # with an empty concatenate instead of saying so.
+            minimum = 2 * chunk_tokens - token_drop
+            raise ValueError(
+                f"Too few latent frames to decode: got {z.shape[1]}, need at least {minimum} "
+                f"(chunk {chunk_tokens} latent frames, token_drop {token_drop})."
+            )
         if pad_tokens > 0:
             tail = mx.broadcast_to(z[:, -1:], (z.shape[0], pad_tokens, *z.shape[2:]))
             z = mx.concatenate([z, tail], axis=1)

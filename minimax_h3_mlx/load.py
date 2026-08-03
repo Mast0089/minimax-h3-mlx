@@ -112,6 +112,136 @@ def load_dit(
     return model
 
 
+def load_video_vae(model_dir: str | Path, strict: bool = True):
+    """Load the video VAE from a released ``video_vae/`` directory.
+
+    The weights live in ``source/model.safetensors`` under the original CompVis-style names, which
+    the port reproduces. Only the convolution weights move: torch stores
+    ``(C_out, C_in, kD, kH, kW)`` and MLX wants ``(C_out, kD, kH, kW, C_in)``.
+    """
+    from .video_vae import VideoVAE, VideoVAEConfig
+
+    model_dir = Path(model_dir)
+    with open(model_dir / "config.json") as fh:
+        wrapper = json.load(fh)
+    with open(model_dir / "source" / "config.json") as fh:
+        source = json.load(fh)
+
+    ch = source["ch"]
+    config = VideoVAEConfig(
+        in_channels=source["in_channels"],
+        out_channels=source["out_ch"],
+        latent_channels=source["z_channels"],
+        block_out_channels=tuple(ch * m for m in source["ch_mult"]),
+        layers_per_block=source["num_res_blocks"],
+        spatial_downsample_factors=tuple(source["space_down"]),
+        temporal_downsample_factors=tuple(source["time_down"]),
+        decoder_num_layers=source["vit_decoder_kwargs"]["num_layers"],
+        decoder_num_attention_heads=source["vit_decoder_kwargs"]["heads"],
+        decoder_attention_head_dim=source["vit_decoder_kwargs"]["dim_head"],
+        decoder_rope_theta=source["vit_decoder_kwargs"]["rope_theta"],
+        decoder_rope_dim_ratio=source["vit_decoder_kwargs"]["rope_dim_ratio"],
+        clip_length=wrapper.get("vae_clip_length", 17),
+        token_drop=wrapper.get("vae_token_drop", 3),
+        latents_mean=tuple(wrapper.get("latents_mean", ())),
+        latents_std=tuple(wrapper.get("latents_std", ())),
+    )
+    model = VideoVAE(config)
+    expected = {key for key, _ in tree_flatten(model.parameters())}
+
+    weights: dict[str, mx.array] = {}
+    unexpected: list[str] = []
+    for key, tensor in mx.load(str(model_dir / "source" / "model.safetensors")).items():
+        # An all-zero buffer of the masked-autoencoding objective; the decoder never reads it.
+        if key == "decoder.mask_token":
+            continue
+        if key not in expected:
+            unexpected.append(key)
+            continue
+        if tensor.ndim == 5:
+            # Channels-last conv weights. Materialize each one as it is produced: deferring 10 GB of
+            # transposes into a single graph overruns the Metal command-buffer timeout.
+            tensor = mx.contiguous(tensor.transpose(0, 2, 3, 4, 1))
+            mx.eval(tensor)
+        weights[key] = tensor
+
+    missing = sorted(expected - weights.keys())
+    if strict and (missing or unexpected):
+        raise KeyError(
+            f"Video VAE mismatch: {len(missing)} missing (e.g. {missing[:4]}), "
+            f"{len(unexpected)} unexpected (e.g. {unexpected[:4]})."
+        )
+    model.update(tree_unflatten(list(weights.items())))
+    mx.eval(model.parameters())
+    return model
+
+
+def load_audio_vae(model_dir: str | Path, strict: bool = True):
+    """Load the audio VAE from a released ``audio_vae/`` directory.
+
+    Weight norm is **folded** here: the checkpoint stores ``weight_g`` / ``weight_v`` and the
+    effective weight is ``g * v / ||v||`` with the norm taken over every axis but the first. Folding
+    once at load is exactly equivalent to recomputing it on every forward, and it lets the port hold
+    a plain weight (proven equivalent by the parity test, which reconstructs the pair).
+    """
+    from .audio_vae import AudioVAE, AudioVAEConfig
+
+    model_dir = Path(model_dir)
+    with open(model_dir / "metadata.json") as fh:
+        kwargs = json.load(fh)["metadata"]["kwargs"]
+
+    config = AudioVAEConfig(
+        encoder_dim=kwargs["encoder_dim"],
+        encoder_rates=tuple(kwargs["encoder_rates"]),
+        latent_dim=kwargs["latent_dim"],
+        latent_channels=kwargs["vae_latent_channels"],
+        decoder_dim=kwargs["decoder_dim"],
+        decoder_rates=tuple(kwargs["decoder_rates"]),
+        sampling_rate=kwargs["sample_rate"],
+    )
+    model = AudioVAE(config)
+    expected = {key for key, _ in tree_flatten(model.parameters())}
+
+    raw = dict(mx.load(str(model_dir / "model.safetensors")))
+    weights: dict[str, mx.array] = {}
+    unexpected: list[str] = []
+
+    for key, tensor in raw.items():
+        if key.endswith(".filter"):
+            continue  # recomputed by kaiser_sinc_filter1d
+        if key.endswith(".weight_v"):
+            base = key[: -len("_v")]
+            g = raw[f"{base}_g"]
+            v = tensor
+            norm = mx.sqrt(mx.sum(mx.square(v.reshape(v.shape[0], -1)), axis=1)).reshape(-1, 1, 1)
+            tensor = g * v / norm
+            key = base
+        elif key.endswith(".weight_g"):
+            continue
+
+        if key not in expected:
+            unexpected.append(key)
+            continue
+
+        if key.endswith(".weight") and tensor.ndim == 3:
+            # Transposed convs are stored (C_in, C_out, kL); plain convs (C_out, C_in, kL).
+            tensor = tensor.transpose(1, 2, 0) if ".ups." in key else tensor.transpose(0, 2, 1)
+        elif key.endswith(".alpha") and tensor.ndim == 3:
+            tensor = tensor.transpose(0, 2, 1)  # (1, C, 1) -> (1, 1, C)
+
+        weights[key] = tensor
+
+    missing = sorted(expected - weights.keys())
+    if strict and (missing or unexpected):
+        raise KeyError(
+            f"Audio VAE mismatch: {len(missing)} missing (e.g. {missing[:4]}), "
+            f"{len(unexpected)} unexpected (e.g. {unexpected[:4]})."
+        )
+    model.update(tree_unflatten(list(weights.items())))
+    mx.eval(model.parameters())
+    return model
+
+
 def parameter_summary(model: MiniMaxH3DiT) -> dict[str, object]:
     """Parameter counts and footprint, split by the AdaLN projections that can be dropped."""
     total = adaln = 0
