@@ -125,7 +125,7 @@ generation quick.
 | Pipeline / denoise loop | not started |
 | Quant set | not started |
 
-All three components were loaded from the released checkpoint and exercised:
+All four components were loaded from the released checkpoint and exercised:
 
 * **DiT** — 33.12B over 534 tensors, every key matched, mixed precision intact (12 float32 tensors
   for the patch projections, timestep MLP and output heads; 522 bfloat16).
