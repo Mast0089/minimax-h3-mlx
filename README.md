@@ -113,6 +113,32 @@ does not reduce. At 5 s the linear layers are ~42% of the work, at 15 s ~20%, so
 worth roughly 1.2-1.4x end-to-end — useful for *fitting* the model on a smaller Mac, not for making
 generation quick.
 
+## Published quants
+
+| build | on disk | resident | PSNR vs bf16 | velocity rel-L2 |
+|---|---:|---:|---:|---:|
+| [8bit](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-8bit) | 35.3 GB | **21.5 GB** | 27.6 dB | 0.0329 |
+| [6bit](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-6bit) | 30.3 GB | **16.5 GB** | — | 0.0611 |
+| [4bit](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-4bit) | 25.3 GB | **11.5 GB** | 22.0 dB | 0.1649 |
+
+Each holds the **transformer only** — the VAEs and text encoder still come from the upstream
+release, which the pipeline loads alongside:
+
+```bash
+python scripts/generate.py "a red fox leaps over a mossy log" -o fox.mp4 \
+  -c /path/to/MiniMax-H3/FL2VA \
+  -t /path/to/MiniMax-H3-MLX-4bit
+```
+
+The core is quantized at the named width; `adaln_proj` is held at 8-bit in every build, which costs
+0.25% on the modulation table and takes 12.2 GB off each download.
+
+**3-bit and 2-bit are not published.** 3-bit was built and rendered: at 16.3 dB PSNR the subject is
+destroyed — no animal, no log, just a textured field. It does not fail by blurring, so a sharpness
+check would have passed it: per-frame variance *rises* to 54.7 against bfloat16's 37.1 as structure
+becomes high-frequency noise. Velocity error ranked the widths correctly but could not have located
+that cliff; only generating found it.
+
 ## Status
 
 | Piece | State |
