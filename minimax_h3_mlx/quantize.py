@@ -13,17 +13,27 @@ What is and is not quantized, and why:
   two output heads. These are float32 in the release for a reason (`_keep_in_fp32_modules` in the
   reference) and together are well under 1% of the model, so quantizing them buys nothing and costs
   precision exactly where the signal enters and leaves the stack.
-* **`adaln_proj` is left alone by default.** Its 13B is the largest block of parameters, so
-  quantizing it looks tempting — but it is read *once*, to build the modulation cache, and then
-  dropped entirely. Its error would not be a per-tensor rounding: every block reads the same `temb`,
-  so an error there biases all 50 blocks identically at every sampling step and accumulates
-  coherently along the denoising trajectory. Paying 26 GB of disk for a tensor that is resident only
-  during a 0.7 s cache build is the right trade.
+* **`adaln_proj` is off by default but 8-bit is measured-safe** (`--quantize-adaln`). Its 13B is the
+  largest block of parameters and, left at bfloat16, it dominates the download of every build — a
+  3-bit core is 9 GB resident inside a 35 GB repository.
 
-The consequence is that a quantized repository is dominated on disk by weights that never stay
-resident. Resident memory after the cache is built is what actually matters:
+  The first-principles argument against quantizing it is that every block reads the same `temb`, so
+  an error there biases all 50 blocks identically. That argument is wrong, and `eval_adaln_quant.py`
+  is what showed it: the table is computed **once**, so quantization perturbs it like slightly
+  different modulation weights rather than introducing drift that compounds along the trajectory.
 
-    4-bit core (~10 GB) + 745 MB cache, against 66.3 GB for the release.
+  Measured shift in the modulation table, against the velocity error the *core* already carries at
+  the same width:
+
+  | adaln bits | table rel-L2 | worst tensor | core velocity rel-L2 |
+  |---:|---:|---|---:|
+  | 8 | **0.0025** | shift_mlp 0.0035 | 0.0329 |
+  | 6 | 0.0031 | shift_mlp 0.0074 | 0.0611 |
+  | 4 | 0.0077 | shift_mlp 0.0282 | 0.1649 |
+
+  At 8 bits the table moves an order of magnitude less than the core's own error, for 12.2 GB off
+  every download. The published builds use it; 4-bit AdaLN is measurably worse and is not
+  recommended even when the core is 4-bit.
 
 Norms and biases stay in their original precision throughout, as MLX's quantizer requires.
 """

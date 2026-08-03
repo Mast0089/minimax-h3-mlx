@@ -81,9 +81,33 @@ precomputed once into a small table, and the projections are then dropped — so
 never resident. The table scales with step count, not model size: measured at **145 MB for a 9-step
 schedule** and 745 MB for 40 steps, against the 26 GB it replaces.
 
-The projections are kept at bfloat16 here rather than quantized. Every block reads the same timestep
-embedding, so an error there is not a per-tensor rounding — it biases all 50 blocks identically at
-every step and accumulates coherently along the denoising trajectory.
+Those projections are quantized to **8-bit** here. That was measured, not assumed: quantizing them
+shifts the modulation table by **0.25%**, an order of magnitude less than the {bits}-bit core's own
+velocity error, and takes 12.2 GB off this download. (4-bit AdaLN is measurably worse — 0.77% on the
+table, 2.8% on its worst tensor — and is not used at any core width.)
+
+## How the widths compare
+
+Measured with teacher forcing — one bfloat16 trajectory recorded, each variant re-predicting the
+velocity at those same latents, so the difference is quantization error alone rather than trajectory
+divergence. 20 paired observations per variant, aggregated with a paired bootstrap.
+
+| bits | video rel-L2 [95% CI] | audio rel-L2 | video cosine |
+|---:|---|---:|---:|
+| 8 | 0.0329 [0.0277, 0.0381] | 0.0130 | 0.99941 |
+| 6 | 0.0611 [0.0501, 0.0728] | 0.0274 | 0.99791 |
+| 4 | 0.1649 [0.1324, 0.1971] | 0.1016 | 0.98456 |
+| 3 | 0.2842 [0.2362, 0.3358] | 0.2341 | 0.95635 |
+
+Every interval is disjoint from its neighbours, so the ranking is solid. Two things worth noting:
+the steepest step is **6 to 4 bits** (2.7x), not at the low end; and audio degrades faster in
+relative terms than video (its share of the error climbs from 0.40x at 8-bit to 0.82x at 3-bit),
+plausibly because audio is a small fraction of the packed rows and has less redundancy to absorb
+error. 2-bit is not published — extrapolation puts it near 50% velocity error.
+
+Note that relative velocity error is not the same as "that much worse output": the scheduler
+integrates velocity across steps, so per-step error compounds along the trajectory. These numbers
+rank the widths reliably; they do not by themselves locate the point where output becomes unusable.
 
 ## Read this before choosing a quant
 
