@@ -150,6 +150,52 @@ class MiniMaxH3Pipeline:
             if verbose:
                 print(f"  dropped {dropped / 1e9:.2f}B adaln params ({dropped * 2 / 1e9:.1f} GB)")
 
+    # -- keyframe conditioning ----------------------------------------------------------------
+
+    def _encode_keyframes(self, images: list, height: int, width: int) -> mx.array:
+        """Encode ``fl2va`` keyframes into packed conditioning rows.
+
+        Keyframes are single frames, so they go through the video VAE's **spatial** encoder only —
+        none of its 17-frame temporal chunking applies. Two details of the reference are load-bearing
+        and easy to miss:
+
+        * the posterior is **sampled**, not taken at its mode, under a generator seeded with 42
+          independently of the request seed;
+        * the sampled latent is **rounded through float16** before normalization, which is about 11
+          bits of every conditioning latent — the released model's conditioning cannot be reproduced
+          without it.
+
+        MLX's RNG differs from torch's, so the seed-42 draw is not bit-identical to the reference's;
+        the distribution and every other step are.
+        """
+        from .packing import KEYFRAME_ENCODE_SEED, prepare_keyframe_image
+
+        cfg = self.video_vae.config
+        latents_mean = mx.array(np.array(cfg.latents_mean, np.float32)).reshape(1, -1, 1, 1, 1)
+        latents_std = mx.array(np.array(cfg.latents_std, np.float32)).reshape(1, -1, 1, 1, 1)
+        pixel_mean = np.array(PIXEL_MEAN, np.float32).reshape(1, 3, 1, 1, 1)
+        pixel_std = np.array(PIXEL_STD, np.float32).reshape(1, 3, 1, 1, 1)
+
+        mx.random.seed(KEYFRAME_ENCODE_SEED)
+        rows = []
+        for index, image in enumerate(images):
+            prepared = prepare_keyframe_image(image, height, width, stretch=index == 0)
+            pixels = np.asarray(prepared, dtype=np.float32).transpose(2, 0, 1)[None, :, None]
+            pixels = (pixels / 255.0 - pixel_mean) / pixel_std
+
+            # (1, 3, 1, H, W) -> channels-last for the spatial encoder.
+            moments = self.video_vae._encode_clip(mx.array(pixels).transpose(0, 2, 3, 4, 1))
+            channels = cfg.latent_channels
+            mean, logvar = moments[..., :channels], moments[..., channels:]
+            logvar = mx.clip(logvar, -30.0, 20.0)
+            std = mx.exp(0.5 * logvar)
+            latent = mean + std * mx.random.normal(mean.shape)
+            # -> (1, C, 1, H', W'), then the float16 round trip the reference relies on.
+            latent = latent.transpose(0, 4, 1, 2, 3).astype(mx.float16).astype(mx.float32)
+            normalized = (latent - latents_mean) / latents_std
+            rows.append(patchify_video_latents(normalized, self.dit.config.patch_size))
+        return mx.concatenate(rows)
+
     # -- generation ---------------------------------------------------------------------------
 
     def __call__(
@@ -208,8 +254,21 @@ class MiniMaxH3Pipeline:
             print(f"packed sequence: {layout.sequence_length:,} rows "
                   f"({len(text_token_tags):,} text, {layout.num_condition_video_rows:,} condition)")
 
-        # 3. Initial noise. Draw order matches the reference: conditions, then video, then audio.
+        # 3. Keyframe conditioning rows, encoded before any request noise is drawn.
+        condition_rows = None
+        if images:
+            condition_rows = self._encode_keyframes(images, height, width)
+
+        # 4. Initial noise. Draw order matches the reference — the conditioning noise comes off the
+        #    request generator first, then video, then audio — so a seed reproduces the same run.
         mx.random.seed(seed)
+        if condition_rows is not None:
+            condition_noise = mx.random.normal(condition_rows.shape).astype(mx.float32)
+            # Anchors are not fully clean: they are noised to t = 0.999 and held there every step.
+            condition_rows = MiniMaxH3Scheduler(shift=self.config.sigma_shift_video).scale_noise(
+                condition_rows, KEYFRAME_NOISE_AUG, condition_noise
+            )
+
         latents = mx.random.normal(
             (1, self.video_vae.config.latent_channels, num_latent_frames, latent_height, latent_width)
         ).astype(mx.float32)
@@ -217,8 +276,10 @@ class MiniMaxH3Pipeline:
         audio_rows = mx.random.normal(
             (num_audio_latents * AUDIO_CHANNELS, self.audio_vae.config.latent_channels)
         ).astype(mx.float32)
+        if condition_rows is not None:
+            video_rows = mx.concatenate([condition_rows, video_rows])
 
-        # 4. Two schedules over one shared forward.
+        # 5. Two schedules over one shared forward.
         video_sched, audio_sched = self._build_schedules(num_inference_steps)
         timestep_table, plan = self._row_timestep_plan(layout, video_sched.timesteps, audio_sched.timesteps)
         self._ensure_cache(timestep_table, drop_adaln, verbose)
@@ -227,7 +288,7 @@ class MiniMaxH3Pipeline:
         n_cond_a = layout.num_condition_audio_rows
         embeds = prompt_embeds.astype(mx.bfloat16)
 
-        # 5. Denoise. One forward per step; only generated rows are written back, so the
+        # 6. Denoise. One forward per step; only generated rows are written back, so the
         #    conditioning anchors survive without any masking.
         step_times = []
         for i, t in enumerate(video_sched.timesteps.tolist()):
@@ -262,7 +323,7 @@ class MiniMaxH3Pipeline:
                 print(f"  step {done}/{len(video_sched.timesteps)}  "
                       f"{step_times[-1]:.1f}s  eta {eta / 60:.1f} min", flush=True)
 
-        # 6. Decode both modalities.
+        # 7. Decode both modalities.
         video = self._decode_video(video_rows[n_cond_v:], num_latent_frames, latent_height, latent_width)
         audio = self._decode_audio(audio_rows[n_cond_a:], num_audio_latents)
         total = time.perf_counter() - run_started

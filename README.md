@@ -141,8 +141,13 @@ All four components were loaded from the released checkpoint and exercised:
   geometry and the VAE's temporal chunking were ported separately and agree.
 * **Text encoder** — 25.16B params over 50 layers; a prompt encodes to `(1, N, 5120)` in 0.9 s.
 
-The keyframe/image path (vision tower, `"<Picture i>: "` labels, vision blocks tagged *video*) is
-implemented but so far only the text-only `t2va` path has been run end to end.
+The keyframe (`fl2va`) path is implemented — conditioning frames are encoded through the VAE's
+spatial encoder, noised to `t = 0.999` and prepended as rows — but only the text-only `t2va` path has
+been run end to end. Two details of the reference are load-bearing there and easy to get wrong: the
+keyframe posterior is **sampled** rather than taken at its mode, under a generator seeded with 42
+*independently of the request seed*, and the sampled latent is **rounded through float16** before
+normalization — about 11 bits of every conditioning latent. MLX's RNG differs from torch's, so that
+draw is not bit-identical to the reference's, though everything around it is.
 
 ### End to end
 
