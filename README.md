@@ -120,9 +120,18 @@ Collection: [**pipenetwork/MiniMax-H3 MLX**](https://huggingface.co/collections/
 
 | build | on disk | resident | PSNR vs bf16 | velocity rel-L2 |
 |---|---:|---:|---:|---:|
+| [f32](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-f32) | 132.5 GB | 80.5 GB | — | — |
+| [bf16](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-bf16) | 66.3 GB | 40.3 GB | reference | reference |
 | [8bit](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-8bit) | 35.3 GB | **21.5 GB** | 27.6 dB | 0.0329 |
 | [6bit](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-6bit) | 30.3 GB | **16.5 GB** | — | 0.0611 |
 | [4bit](https://huggingface.co/pipenetwork/MiniMax-H3-MLX-4bit) | 25.3 GB | **11.5 GB** | 22.0 dB | 0.1649 |
+
+`bf16` is the faithful conversion: it preserves the release's **mixed** precision rather than
+flattening it — MiniMax ships twelve tensors (the two patch projections, the timestep MLP, both
+output heads) in float32 and the other 522 in bfloat16, and casting those twelve down would be a
+downgrade from upstream. `f32` upcasts everything; since the source weights are bfloat16 that is a
+lossless widening carrying **no additional information**, published for float32 fine-tuning rather
+than for generating. `load_dit(dtype=mx.float32)` gives the same thing from the smaller download.
 
 Each holds the **transformer only** — the VAEs and text encoder still come from the upstream
 release, which the pipeline loads alongside:
@@ -142,6 +151,85 @@ check would have passed it: per-frame variance *rises* to 54.7 against bfloat16'
 becomes high-frequency noise. Velocity error ranked the widths correctly but could not have located
 that cliff; only generating found it.
 
+## How the quants were chosen
+
+Comparing independent generations is the obvious way to rank widths and it is the wrong one.
+Diffusion trajectories diverge chaotically from the first step, so the difference between a bf16
+clip and a 4-bit clip is dominated by divergence amplification rather than by quantization error —
+and at ~9 minutes per step, a sample large enough to separate five widths would take days.
+
+`eval_quant.py` uses **teacher forcing** instead. One bfloat16 trajectory is recorded, and every
+variant re-predicts the velocity *at those same latents*. Both models see identical inputs at every
+point, so what is measured is quantization error alone, and each `(prompt, seed, step)` becomes an
+independent paired observation. Aggregation is a **paired bootstrap** resampling one shared index
+set across variants, which removes the between-input variance that otherwise swamps the
+between-variant gaps.
+
+| bits | video rel-L2 [95% CI] | audio rel-L2 | video cosine |
+|---:|---|---:|---:|
+| 8 | 0.0329 [0.0277, 0.0381] | 0.0130 | 0.99941 |
+| 6 | 0.0611 [0.0501, 0.0728] | 0.0274 | 0.99791 |
+| 4 | 0.1649 [0.1324, 0.1971] | 0.1016 | 0.98456 |
+| 3 | 0.2842 [0.2362, 0.3358] | 0.2341 | 0.95635 |
+
+Every interval is disjoint from its neighbours on only 20 observations per variant — an unpaired
+comparison at that sample size would have produced overlapping intervals and an unusable ranking.
+Two results that were not predictable in advance: the steepest step is **6 to 4 bits** (2.7x), not
+at the low end, so interpolating between 8 and 4 puts the knee in the wrong place; and **audio
+degrades faster in relative terms** than video, its share of the error climbing 0.40x -> 0.82x
+across the range, plausibly because audio is a small fraction of the packed rows and has less
+redundancy to absorb it.
+
+Velocity error is the right quantity to watch rather than final pixels, because the scheduler
+*integrates* it — a bias that is small per step still accumulates along the trajectory. That same
+property is why it cannot tell you where output stops being usable, which has to be generated. It
+is: 4-bit keeps the subject at 22.0 dB, 3-bit destroys it at 16.3 dB.
+
+### AdaLN: measure, do not reason
+
+`adaln_proj` is 13B of the 33B and dominates every build's download. The intuitive argument for
+keeping it at bfloat16 is that every block reads the same `temb`, so an error there biases all 50
+blocks and compounds. That argument is wrong. The table is computed **once**, so quantization
+perturbs it like slightly different modulation weights, with nothing to compound.
+
+`eval_adaln_quant.py` measures it directly — no forward passes, just build the table from bfloat16
+and from quantized weights and compare:
+
+| adaln bits | table rel-L2 | worst tensor | core velocity rel-L2 at that width |
+|---:|---:|---|---:|
+| 8 | **0.0025** | shift_mlp 0.0035 | 0.0329 |
+| 6 | 0.0031 | shift_mlp 0.0074 | 0.0611 |
+| 4 | 0.0077 | shift_mlp 0.0282 | 0.1649 |
+
+8-bit AdaLN moves the table an order of magnitude less than the core's own error and takes 12.2 GB
+off every download, so every published build uses it. 4-bit AdaLN is 3x worse and is not used at any
+core width. Per-tensor error is reported rather than one aggregate because the six modulation
+tensors do not enter equally: `x * (1 + scale) + shift` for the norms, `x + gate * f(x)` for the
+residual branches.
+
+## Porting notes: MLX specifics worth knowing
+
+Things that cost real debugging time here and generalize to other diffusion ports:
+
+* **`QuantizedLinear.weight` is packed uint32.** The reference aligns each activation to its
+  projection's parameter dtype, and `layer.weight.dtype` is the natural way to express that — but
+  once a layer is quantized it truncates activations to integers. It fails *silently and
+  identically at every bit width*, which is the tell. Read `layer.scales.dtype` instead
+  (`dit.param_dtype`).
+* **Metal command buffers have a deadline.** Bulk work at checkpoint scale — 10 GB of 5-D conv
+  transposes, or casting a 33B stack to float32 — overruns it, and worse, only once something else
+  is using the GPU. Both now run on the CPU stream, which has no such limit. The failure mode is
+  ugly: it aborts a multi-hour run at the *last* component to load.
+* **Convolutions are channels-last.** `(N, D, H, W, C)` with weights `(C_out, kD, kH, kW, C_in)`
+  against torch's `(N, C, D, H, W)` / `(C_out, C_in, kD, kH, kW)`. Both VAEs run channels-last
+  internally and transpose only at their public boundary.
+* **There is no reflect padding.** `mx.pad` offers constant and edge only; reflect is done by
+  gather (`video_vae.reflect_pad`).
+* **`mx.linspace` does not match `torch.linspace`.** ATen takes a float32 step, splits the range at
+  the halfway point, and evaluates with an FMA. Here that mattered: the sigma grid is collapsed by a
+  consecutive-duplicate check, so a one-ulp difference changes how many sigmas survive and therefore
+  *the number of model evaluations*.
+
 ## Status
 
 | Piece | State |
@@ -155,7 +243,7 @@ that cliff; only generating found it.
 | Text encoder | **done** — `hidden_states[50]` matches HF to 5.0e-08 |
 | Checkpoint loaders | **done** — all four components load from the release, zero key mismatches |
 | Pipeline / denoise loop | **done** — generates prompt-faithful video + synced audio |
-| Quant set | not started |
+| Quant set | **done** — f32 / bf16 / 8 / 6 / 4-bit published; 3-bit built but withheld |
 
 All four components were loaded from the released checkpoint and exercised:
 
@@ -260,9 +348,20 @@ minimax_h3_mlx/
   text_encoder.py Qwen3-VL-32B conditioner, truncated to the 50 layers H3 reads
   pipeline.py    packing, the joint denoise loop, decoding
   media.py       mp4 / wav writing, dependency-free
-reference/       upstream sources, for validation only
-scripts/         bench_dit.py
-tests/           parity + smoke tests
+reference/       upstream sources, vendored for validation only (see reference/README.md)
+
+scripts/
+  generate.py           the CLI: prompt (+ keyframes) -> mp4
+  build_quant.py        quantized builds; several widths from one load
+  build_unquantized.py  bf16 (native mixed) / f32 builds
+  eval_quant.py         teacher-forced paired comparison across widths
+  eval_adaln_quant.py   how far quantizing adaln_proj moves the modulation table
+  bench_dit.py          per-block timing at realistic packed lengths
+  upload.py             publish to the Hub; refuses to run without the upstream LICENSE
+  make_collection.py    build/refresh the Hub collection
+  run_tests.sh          all seven suites
+
+tests/           parity vs the reference, quant round-trip, smoke
 ```
 
 ## License
