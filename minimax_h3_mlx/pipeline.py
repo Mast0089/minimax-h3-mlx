@@ -14,6 +14,7 @@ the 13B of `adaln_proj` is then dropped — see :mod:`minimax_h3_mlx.adaln`.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,14 @@ from .packing import (
     video_latent_num_frames,
 )
 from .scheduler import MiniMaxH3Scheduler
+
+# Diagnostic-only, opt-in: set MINIMAX_H3_DUMP=/path/to/prefix to print per-step velocity/latent
+# statistics and dump the final packed rows + text embeds to ``<prefix>_*.npy``. Added while
+# tracking down why a real run collapses to a near-uniform video latent -- this is what localized
+# it (video x0 std shrinking every step instead of growing toward ~1) -- and left in place since
+# it is the fastest way back into that state for anyone resuming the investigation. No effect
+# unless the env var is set.
+_DUMP_PATH = os.environ.get("MINIMAX_H3_DUMP")
 
 
 @dataclass
@@ -334,6 +343,14 @@ class MiniMaxH3Pipeline:
                 mx.concatenate([audio_rows[:n_cond_a], stepped_audio]) if n_cond_a else stepped_audio
             )
             mx.eval(video_rows, audio_rows)
+            if _DUMP_PATH:
+                vp = np.array(video_pred[0].astype(mx.float32))
+                ap = np.array(audio_pred[0].astype(mx.float32))
+                vr = np.array(video_rows.astype(mx.float32))
+                ar = np.array(audio_rows.astype(mx.float32))
+                print(f"    [dump] t={float(t):.4f} vpred mean={vp.mean():+.4f} std={vp.std():.4f} absmax={abs(vp).max():.3f} | "
+                      f"vrows mean={vr.mean():+.4f} std={vr.std():.4f} absmax={abs(vr).max():.3f} | "
+                      f"apred std={ap.std():.4f} arows std={ar.std():.4f} absmax={abs(ar).max():.3f}", flush=True)
             step_times.append(time.perf_counter() - started)
             if verbose:
                 done = i + 1
@@ -341,6 +358,12 @@ class MiniMaxH3Pipeline:
                 eta = mean * (len(video_sched.timesteps) - done)
                 print(f"  step {done}/{len(video_sched.timesteps)}  "
                       f"{step_times[-1]:.1f}s  eta {eta / 60:.1f} min", flush=True)
+
+        if _DUMP_PATH:
+            np.save(_DUMP_PATH + "_video_rows.npy", np.array(video_rows.astype(mx.float32)))
+            np.save(_DUMP_PATH + "_audio_rows.npy", np.array(audio_rows.astype(mx.float32)))
+            np.save(_DUMP_PATH + "_embeds.npy", np.array(prompt_embeds.astype(mx.float32)))
+            print(f"    [dump] wrote {_DUMP_PATH}_*.npy", flush=True)
 
         # 7. Decode both modalities.
         video = self._decode_video(video_rows[n_cond_v:], num_latent_frames, latent_height, latent_width)

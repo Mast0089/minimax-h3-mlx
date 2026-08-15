@@ -6,8 +6,14 @@ drives two independent schedules over one shared transformer forward.
 
 from __future__ import annotations
 
+import os
+
 import mlx.core as mx
 import numpy as np
+
+# Diagnostic-only, opt-in: set MINIMAX_H3_DUMP=1 to print the per-step x0 reconstruction (see
+# ``step`` below). Shares the env var with ``pipeline.py``'s dump; no effect unless it is set.
+_DUMP_PATH = os.environ.get("MINIMAX_H3_DUMP")
 
 
 def _linspace_1_to_0(n: int) -> np.ndarray:
@@ -144,6 +150,13 @@ class MiniMaxH3Scheduler:
         # doing it in Python floats would round twice and drift by an ulp per step.
         sigma_from_timestep = float(np.float32(1.0) - np.float32(timestep))
         denoised = sample + sigma_from_timestep * model_output
+
+        if _DUMP_PATH:
+            d = np.array(denoised.astype(mx.float32))
+            s = np.array(sample.astype(mx.float32))
+            m = np.array(model_output.astype(mx.float32))
+            print(f"      [x0] shift={self._shift:<5} t={timestep:.4f} sigma_t={sigma_from_timestep:.4f} "
+                  f"x_t.std={s.std():.4f} v.std={m.std():.4f} -> x0.std={d.std():.4f} x0.absmax={abs(d).max():.3f}", flush=True)
 
         sigma = np.float32(self.sigmas[self._step_index].item())
         sigma_next = np.float32(self.sigmas[self._step_index + 1].item())
